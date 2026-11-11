@@ -65,6 +65,8 @@ OTHER LIMITS
   - Installing the Claude Code, Codex or Gemini plugins from inside Warp
     writes into those tools' own folders in your user profile.
   - "Start Warp at login" is not available.
+  - Warp offers PowerShell (and WSL / Git Bash if installed) as shells;
+    cmd is not available as a Warp shell.
 
 SOURCE CODE AND LICENCES
 ------------------------
