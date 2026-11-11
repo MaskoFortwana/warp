@@ -57,13 +57,29 @@ jobs:
         shell: pwsh
         run: choco install protoc --no-progress -y
 
-      - name: cargo check (warp-oss, OSS channel features)
+      - name: cargo check (warp-oss, OSS channel features, portable)
+        shell: pwsh
+        run: cargo check --locked -p warp --bin warp-oss --target $env:TARGET --features "$env:OSS_FEATURES,portable"
+
+      - name: cargo check (warp-oss, OSS channel features, upstream behaviour)
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: cargo check --locked -p warp --bin warp-oss --target $env:TARGET --features $env:OSS_FEATURES
 
-      - name: cargo test (warp_core)
+      - name: cargo test (warp_core, portable)
+        if: ${{ !cancelled() }}
         shell: pwsh
-        run: cargo test --locked -p warp_core --target $env:TARGET
+        run: cargo test --locked -p warp_core --target $env:TARGET --features local_fs,portable
+
+      - name: cargo test (warp_core, upstream behaviour)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: cargo test --locked -p warp_core --target $env:TARGET --features local_fs
+
+      - name: cargo clippy (warp_core, portable)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: cargo clippy --locked -p warp_core --target $env:TARGET --all-targets --tests --features local_fs,portable -- -D warnings
 
       - name: Report runner disk (end)
         if: ${{ !cancelled() }}
