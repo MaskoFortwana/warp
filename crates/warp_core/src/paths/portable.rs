@@ -73,6 +73,27 @@ impl fmt::Display for PortableInitError {
     }
 }
 
+impl PortableInitError {
+    /// Text for the dialog shown when the app refuses to start. There is no log yet at that point,
+    /// so this is the only thing the user sees.
+    pub fn user_message(&self) -> String {
+        match self {
+            Self::ExePath(source) => format!(
+                "Warp Portable cannot start because it cannot determine where it is located.\n\n\
+                 Details: {source}"
+            ),
+            Self::CreateDir { path, source } | Self::ProbeWrite { path, source } => format!(
+                "Warp Portable cannot start because it cannot write to its data folder:\n\n\
+                 {}\n\n\
+                 Move the Warp Portable folder to a location where you can write (for example \
+                 your Desktop or a USB stick) and start it again.\n\n\
+                 Details: {source}",
+                path.display()
+            ),
+        }
+    }
+}
+
 impl std::error::Error for PortableInitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
