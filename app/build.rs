@@ -522,6 +522,29 @@ END
 "#,
     )
     .unwrap();
+
+    // Portable builds must never ask for elevation, and without a manifest the requested level is
+    // left to Windows' installer-detection heuristics. Only the UAC level is declared so that no
+    // other runtime behaviour changes compared with upstream builds.
+    if env::var_os("CARGO_FEATURE_PORTABLE").is_some() {
+        let manifest_path = target_dir.join("portable.manifest");
+        fs::write(
+            &manifest_path,
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+</assembly>
+"#,
+        )
+        .unwrap_or_else(|err| panic!("Could not write portable manifest: {err:#}"));
+        writeln!(rcfile, "1 24 \"portable.manifest\"").unwrap();
+    }
     drop(rcfile);
 
     // Obtain MSVC environment so that the rc compiler can find the right headers.

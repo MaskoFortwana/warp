@@ -31,6 +31,7 @@ jobs:
     timeout-minutes: 300
     outputs:
       version: ${{ steps.version.outputs.version }}
+      zip_uploaded: ${{ steps.upload_zip.outcome == 'success' }}
     steps:
       - name: Report runner resources (start)
         shell: pwsh
@@ -60,6 +61,7 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           shared-key: windows-build-rlto
+          cache-on-failure: true
 
       - name: Install protoc
         shell: pwsh
@@ -84,7 +86,22 @@ jobs:
         run: ./script/windows/bundle_portable.ps1 -Version $env:PORTABLE_VERSION -BaseCommit $env:BASE_COMMIT -Stage
 
       # Signing slot (issue #26): a future step signs the staged *.exe and *.dll in place here,
-      # between staging and verification, so the zip and the checks see the signed binaries.
+      # before zipping, so the zip and the checks see the signed binaries.
+
+      - name: Zip
+        id: zip
+        shell: pwsh
+        run: ./script/windows/bundle_portable.ps1 -Version $env:PORTABLE_VERSION -BaseCommit $env:BASE_COMMIT -Zip -SkipBuild
+
+      - name: Upload the zip
+        id: upload_zip
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: warp-portable-x64-${{ steps.version.outputs.version }}
+          path: |
+            ${{ steps.zip.outputs.zip_path }}
+            ${{ steps.zip.outputs.sha256sums_path }}
+          if-no-files-found: error
 
       - name: Verify the portable folder (imports, manifest, readme)
         shell: pwsh
@@ -94,24 +111,10 @@ jobs:
           -ExpectedStrings $env:FORK_URL, $env:GITHUB_SHA, $env:BASE_COMMIT
           -ReportPath dist/portable/static-report.md
 
-      - name: Zip
-        id: zip
-        shell: pwsh
-        run: ./script/windows/bundle_portable.ps1 -Version $env:PORTABLE_VERSION -BaseCommit $env:BASE_COMMIT -Zip -SkipBuild
-
       - name: Report runner resources (end)
         if: ${{ !cancelled() }}
         shell: pwsh
         run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
-
-      - name: Upload the zip
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: warp-portable-x64-${{ steps.version.outputs.version }}
-          path: |
-            ${{ steps.zip.outputs.zip_path }}
-            ${{ steps.zip.outputs.sha256sums_path }}
-          if-no-files-found: error
 
       - name: Upload the static report
         if: ${{ !cancelled() }}
@@ -124,6 +127,8 @@ jobs:
   # Runtime verification of the zip (M3): unzip as a user would, start, type, compare before/after.
   verify:
     needs: build
+    # Runs whenever a zip exists, also when a static check failed, so both reports are available.
+    if: ${{ !cancelled() && needs.build.outputs.zip_uploaded == 'true' }}
     uses: ./.github/workflows/portable-verify.yml
     with:
       artifact_name: warp-portable-x64-${{ needs.build.outputs.version }}
