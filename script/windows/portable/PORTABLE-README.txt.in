@@ -1,0 +1,86 @@
+WARP PORTABLE (UNOFFICIAL BUILD)
+================================
+
+WHAT THIS IS
+------------
+This is an unofficial, portable build of the open-source Warp terminal
+(the "OSS" channel). It is not made, signed off or supported by Warp or
+Denver Technologies, Inc. Please do not ask them for support with it.
+
+HOW TO START
+------------
+1. Unzip the whole archive anywhere you can write to, for example the
+   Desktop or a USB stick. Paths with spaces are fine.
+2. Double-click warp-oss.exe.
+
+No administrator rights are needed and there is nothing to install.
+
+WHERE YOUR DATA IS STORED
+-------------------------
+Settings, themes, history and logs are kept in the "data" folder next to
+warp-oss.exe. It is created the first time you start the app.
+
+  - To move everything to another PC: copy the whole WarpPortable folder.
+  - To remove everything: delete the WarpPortable folder.
+
+The folder must be writable. If it is not, Warp shows an error instead of
+storing data somewhere else.
+
+FIRST-RUN WARNING (WINDOWS SMARTSCREEN)
+---------------------------------------
+This build is not code-signed. If the zip was downloaded with a browser,
+Windows may show "Windows protected your PC" when you start it. Click
+"More info", then "Run anyway".
+
+To avoid the warning, do one of these:
+  - copy the zip to the PC over a USB stick, a network share or RDP, or
+  - before unzipping, run this in PowerShell:
+        Unblock-File -Path <path to the zip>
+
+Computers managed with AppLocker or WDAC policies may refuse to run
+unsigned programs. If that happens, this build cannot be used there.
+
+SIGNING IN
+----------
+Warp's AI and cloud features need a Warp account and an internet
+connection. The terminal itself works without signing in: choose
+"Skip for now" on the sign-in screen.
+
+In this portable build the browser sign-in does not return to the app
+automatically. To sign in:
+  1. Start the sign-in and log in in your browser.
+  2. Copy the link the browser page tries to open. It starts with
+     warposs://
+  3. In the same Warp window, click "Click here to paste your token from
+     the browser" and paste the link.
+
+Your sign-in does not move with the folder. On another PC or under another
+Windows user you have to sign in again.
+
+OTHER LIMITS
+------------
+  - No automatic updates. A new version is a new zip.
+  - warposs:// links (for example shared sessions or Warp Drive links)
+    do not open the app.
+  - Installing the Claude Code, Codex or Gemini plugins from inside Warp
+    writes into those tools' own folders in your user profile.
+  - "Start Warp at login" is not available.
+
+SOURCE CODE AND LICENCES
+------------------------
+Warp is licensed under the AGPL. The source code for this exact build is at:
+  @FORK_URL@/tree/@BUILD_COMMIT@
+
+It is based on upstream https://github.com/warpdotdev/warp
+at commit @BASE_COMMIT@.
+
+Licences are in this folder:
+  LICENSE-AGPL
+  LICENSE-MIT
+  resources\THIRD_PARTY_LICENSES.txt  (third-party components)
+
+BUILD
+-----
+Version:      @VERSION@
+Build date:   @BUILD_DATE@
+Build commit: @BUILD_COMMIT@
