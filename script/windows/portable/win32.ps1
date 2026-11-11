@@ -391,6 +391,9 @@ function ConvertTo-KeyChord {
     $keyName = $parts[$parts.Count - 1].ToLowerInvariant()
     if ($namedKeys.ContainsKey($keyName)) {
         $key = [uint16]$namedKeys[$keyName]
+    } elseif ($keyName -match '^f([1-9]|1[0-2])$') {
+        # F1..F12 are 0x70..0x7B.
+        $key = [uint16](0x70 + [int]$Matches[1] - 1)
     } elseif ($keyName -match '^[a-z0-9]$') {
         # Virtual-key codes of letters and digits equal their upper-case ASCII code.
         $key = [uint16][int][char]$keyName.ToUpperInvariant()
