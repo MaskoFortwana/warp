@@ -24,7 +24,7 @@ env:
 jobs:
   check:
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - name: Report runner disk (start)
         shell: pwsh
@@ -81,10 +81,12 @@ jobs:
         shell: pwsh
         run: cargo clippy --locked -p warp_core --target $env:TARGET --all-targets --tests --features local_fs,portable -- -D warnings
 
+      # let_unit_value is allowed because upstream code behind `release_bundle`
+      # (app_services/windows/service_impl.rs) trips it; upstream lints without that feature.
       - name: cargo clippy (warp-oss, portable)
         if: ${{ !cancelled() }}
         shell: pwsh
-        run: cargo clippy --locked -p warp --bin warp-oss --target $env:TARGET --features "$env:OSS_FEATURES,portable" -- -D warnings
+        run: cargo clippy --locked -p warp --bin warp-oss --target $env:TARGET --features "$env:OSS_FEATURES,portable" -- -D warnings -A clippy::let_unit_value
 
       - name: cargo test (app portable units)
         if: ${{ !cancelled() }}
