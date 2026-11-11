@@ -15683,6 +15683,7 @@ dependencies = [
  "dashmap",
  "directories",
  "dirs 6.0.0",
+ "dunce",
  "enum-iterator",
  "futures",
  "futures-lite 1.13.0",
