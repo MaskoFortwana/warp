@@ -68,7 +68,8 @@ OTHER LIMITS
 
 SOURCE CODE AND LICENCES
 ------------------------
-Warp is licensed under the AGPL. The source code for this exact build is at:
+Warp's source code is published under the licences in LICENSE-AGPL and
+LICENSE-MIT. The source code for this exact build is at:
   @FORK_URL@/tree/@BUILD_COMMIT@
 
 It is based on upstream https://github.com/warpdotdev/warp
