@@ -1,0 +1,71 @@
+# Cheap compile check for the portable Windows build. Runs before any full
+# release build so compile errors cost minutes, not hours.
+name: portable-check
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [portable]
+
+concurrency:
+  group: portable-check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
+  TARGET: x86_64-pc-windows-msvc
+  OSS_FEATURES: release_bundle,gui,nld_classifier_v3,nld_heuristic_v2
+
+jobs:
+  check:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - name: Report runner disk (start)
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+
+      - name: Enable long paths for git
+        shell: pwsh
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Set CARGO_HOME
+        shell: pwsh
+        run: Add-Content $env:GITHUB_ENV "CARGO_HOME=C:\cargo"
+
+      - name: Install the pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustup target add $env:TARGET
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-check
+
+      - name: Install protoc
+        shell: pwsh
+        run: choco install protoc --no-progress -y
+
+      - name: cargo check (warp-oss, OSS channel features)
+        shell: pwsh
+        run: cargo check --locked -p warp --bin warp-oss --target $env:TARGET --features $env:OSS_FEATURES
+
+      - name: cargo test (warp_core)
+        shell: pwsh
+        run: cargo test --locked -p warp_core --target $env:TARGET
+
+      - name: Report runner disk (end)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
