@@ -8,6 +8,13 @@ use warp_core::channel::{Channel, ChannelConfig, ChannelState, OzConfig, WarpSer
 
 // Simple wrapper around warp::run() for Warp OSS builds.
 fn main() -> Result<()> {
+    // Runs before anything resolves a path or opens a log, so no state can land in the profile.
+    #[cfg(feature = "portable")]
+    if let Err(err) = warp_core::paths::portable::init() {
+        show_portable_init_error(&err);
+        std::process::exit(2);
+    }
+
     let mut state = ChannelState::new(
         Channel::Oss,
         ChannelConfig {
@@ -27,6 +34,23 @@ fn main() -> Result<()> {
     ChannelState::set(state);
 
     warp::run()
+}
+
+#[cfg(all(feature = "portable", windows))]
+fn show_portable_init_error(err: &warp_core::paths::portable::PortableInitError) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    use windows::core::{HSTRING, w};
+
+    let text = HSTRING::from(err.user_message());
+    // SAFETY: both strings are valid, NUL-terminated UTF-16 for the duration of the call.
+    unsafe {
+        MessageBoxW(None, &text, w!("Warp Portable"), MB_OK | MB_ICONERROR);
+    }
+}
+
+#[cfg(all(feature = "portable", not(windows)))]
+fn show_portable_init_error(err: &warp_core::paths::portable::PortableInitError) {
+    eprintln!("{}", err.user_message());
 }
 
 // If we're not using an external plist, embed the following as the Info.plist.

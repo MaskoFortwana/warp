@@ -109,3 +109,28 @@ fn every_warp_directory_resolves_under_root() {
 fn root_has_no_verbatim_prefix() {
     assert!(!root().to_string_lossy().starts_with(r"\\?\"));
 }
+
+#[test]
+fn user_message_names_the_folder_and_what_to_do() {
+    let root = Path::new("Tools").join("Warp Portable").join("data");
+    let err = PortableInitError::ProbeWrite {
+        path: root.clone(),
+        source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access denied"),
+    };
+
+    let message = err.user_message();
+
+    assert!(message.contains(&root.display().to_string()));
+    assert!(message.contains("Move the Warp Portable folder"));
+    assert!(message.contains("access denied"));
+}
+
+#[test]
+fn user_message_without_a_path_still_explains_the_problem() {
+    let err = PortableInitError::ExePath(std::io::Error::other("no exe"));
+
+    let message = err.user_message();
+
+    assert!(message.contains("cannot determine where it is located"));
+    assert!(message.contains("no exe"));
+}
