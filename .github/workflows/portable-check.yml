@@ -24,7 +24,7 @@ env:
 jobs:
   check:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 40
     steps:
       - name: Report runner disk (start)
         shell: pwsh
