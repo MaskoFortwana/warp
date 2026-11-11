@@ -26,6 +26,10 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 if (-not $SelfTest) {
+    # Warp writes no log file when CI is set (warp_logging/src/native.rs), and GitHub Actions sets
+    # it; a user's machine does not, so the app must be started without it.
+    Remove-Item -LiteralPath 'Env:CI' -ErrorAction SilentlyContinue
+
     # Dot-sourced at script scope so its functions are visible everywhere below.
     . (Join-Path -Path $PSScriptRoot -ChildPath 'win32.ps1')
 }
