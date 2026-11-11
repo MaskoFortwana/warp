@@ -1,3 +1,4 @@
+#[cfg(not(feature = "portable"))]
 use registry::register_uri_handler;
 #[cfg(feature = "release_bundle")]
 use warp_errors::report_error;
@@ -79,5 +80,7 @@ pub fn pass_startup_args_to_existing_instance(
 pub(super) fn init(_ctx: &mut AppContext) {
     #[cfg(feature = "release_bundle")]
     _ctx.add_singleton_model(SingleInstanceManager::new);
+    // The portable build must not write the URI scheme into HKCU\Software\Classes.
+    #[cfg(not(feature = "portable"))]
     register_uri_handler();
 }
