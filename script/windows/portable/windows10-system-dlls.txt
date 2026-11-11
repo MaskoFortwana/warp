@@ -1,0 +1,109 @@
+# DLLs that ship with every clean Windows 10 1903 (build 18362) x64 install.
+#
+# Rule: an entry belongs here only if the DLL is part of a clean Windows 10
+# 1903 x64 install (no redistributable, SDK or optional feature needed).
+# The first CI run prints the actual import list of the staged folder; review
+# it against this file and add or remove entries deliberately.
+#
+# One lowercase name per line. A trailing '*' makes the line a prefix match.
+# Deliberately NOT listed (must be shipped in the zip): vcruntime140*.dll,
+# msvcp140*.dll, vulkan-1.dll, dxcompiler.dll, dxil.dll, conpty.dll.
+
+# --- core / kernel ---
+kernel32.dll
+kernelbase.dll
+kernel.appcore.dll
+ntdll.dll
+sechost.dll
+win32u.dll
+advapi32.dll
+rpcrt4.dll
+psapi.dll
+version.dll
+powrprof.dll
+cfgmgr32.dll
+setupapi.dll
+dbghelp.dll
+dbgcore.dll
+pdh.dll
+wevtapi.dll
+rstrtmgr.dll
+cabinet.dll
+
+# --- C runtime shipped with Windows ---
+ucrtbase.dll
+msvcrt.dll
+msvcp_win.dll
+
+# --- user interface ---
+user32.dll
+gdi32.dll
+gdi32full.dll
+shell32.dll
+shlwapi.dll
+shcore.dll
+comctl32.dll
+comdlg32.dll
+uxtheme.dll
+dwmapi.dll
+imm32.dll
+msimg32.dll
+oleacc.dll
+uiautomationcore.dll
+propsys.dll
+userenv.dll
+wtsapi32.dll
+credui.dll
+winmm.dll
+
+# --- COM ---
+ole32.dll
+oleaut32.dll
+combase.dll
+
+# --- graphics ---
+d3d11.dll
+d3d12.dll
+dxgi.dll
+dcomp.dll
+d3dcompiler_47.dll
+d2d1.dll
+dwrite.dll
+windowscodecs.dll
+opengl32.dll
+glu32.dll
+
+# --- input devices ---
+hid.dll
+dinput8.dll
+xinput1_4.dll
+
+# --- crypto / security ---
+bcrypt.dll
+bcryptprimitives.dll
+crypt32.dll
+cryptbase.dll
+cryptsp.dll
+ncrypt.dll
+secur32.dll
+sspicli.dll
+wintrust.dll
+authz.dll
+
+# --- network ---
+ws2_32.dll
+wsock32.dll
+mswsock.dll
+iphlpapi.dll
+dnsapi.dll
+winhttp.dll
+wininet.dll
+urlmon.dll
+netapi32.dll
+mpr.dll
+wldap32.dll
+normaliz.dll
+
+# --- API sets (virtual DLLs resolved by the loader) ---
+api-ms-win-*
+ext-ms-win-*
