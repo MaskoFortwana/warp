@@ -4,6 +4,8 @@ use warp_core::channel::ChannelState;
 use warp_errors::report_error;
 use windows_registry::{CURRENT_USER, HSTRING};
 
+// Unused in portable builds, which must not write to the registry.
+#[cfg_attr(feature = "portable", allow(dead_code))]
 pub(super) fn register_uri_handler() {
     // To change the settings for the user, changes must be made under
     // HKEY_CURRENT_USER\Software\Classes instead of under HKEY_CLASSES_ROOT since only an

@@ -2813,6 +2813,7 @@ impl FeaturesPageView {
         if general_settings
             .add_app_as_login_item
             .is_supported_on_current_platform()
+            && !cfg!(feature = "portable")
         {
             general_widgets.push(Box::new(LoginItemWidget::default()));
         }
