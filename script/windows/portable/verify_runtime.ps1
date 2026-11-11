@@ -172,6 +172,20 @@ function Compare-RegistryExport {
     }
 }
 
+function Find-ThemeSetting {
+    # Flattened settings entries whose key mentions a theme and whose value
+    # mentions Light (case-insensitive).
+    param([Parameter(Mandatory = $true)][System.Collections.IDictionary]$Flat)
+
+    $hits = [System.Collections.Generic.List[object]]::new()
+    foreach ($key in $Flat.Keys) {
+        if ($key -match '(?i)theme' -and [string]$Flat[$key] -match '(?i)light') {
+            $hits.Add([pscustomobject]@{ Key = $key; Before = $null; After = [string]$Flat[$key] })
+        }
+    }
+    return $hits.ToArray()
+}
+
 function Get-NewProcessIds {
     # Ids present after but not before (browser guard).
     param([AllowEmptyCollection()][int[]]$Before = @(), [AllowEmptyCollection()][int[]]$After = @())
@@ -421,6 +435,16 @@ function Invoke-SelfTest {
         Assert-Equal (Test-PathExcluded -Path ('C:\Users\runneradmin\' + $real) -ExcludePrefix $ex) $false "not excluded: $real"
     }
 
+    # Theme setting lookup
+    $themeFlat = ConvertTo-FlatSettings -Text '{"Theme": "\"Light\"", "Other": "light", "FontSize": 13}' -Prefix 'p'
+    $themeHits = @(Find-ThemeSetting -Flat $themeFlat)
+    Assert-Equal $themeHits.Count 1 'one theme key with a light value'
+    Assert-Equal $themeHits[0].Key 'p.Theme' 'theme key name'
+    $darkHits = @(Find-ThemeSetting -Flat (ConvertTo-FlatSettings -Text '{"Theme": "Dark"}' -Prefix 'p'))
+    Assert-Equal $darkHits.Count 0 'dark theme is not a hit'
+    $tomlHits = @(Find-ThemeSetting -Flat (ConvertTo-FlatSettings -Text "[appearance]`ntheme = `"Light`"`n" -Prefix 't'))
+    Assert-Equal $tomlHits.Count 1 'toml theme key'
+
     # Browser guard
     $newIds = @(Get-NewProcessIds -Before @(1, 2) -After @(2, 3, 4))
     Assert-Equal ($newIds -join ',') '3,4' 'new process ids'
@@ -634,14 +658,18 @@ function Select-ModalWindow {
 }
 
 function Stop-WarpGracefully {
-    # Closes like a user: WM_CLOSE, then Enter to confirm the quit warning that
-    # Warp shows while a session is running (show_warning_before_quitting).
-    # WM_CLOSE is never sent to the dialog itself, because closing it would
-    # cancel the quit. Settings are only reliably on disk after a graceful exit.
-    #   WM_CLOSE -> 5 s -> screenshot + Enter -> 10 s -> WM_CLOSE + Enter -> 10 s -> kill.
+    # Warp's quit action only exists in the workspace, so the two cases differ.
+    # -ExpectWorkspace $false (still in onboarding, nothing to save): WM_CLOSE,
+    #   5 s, then kill; reported as INFO, not as a warning.
+    # -ExpectWorkspace $true: WM_CLOSE -> 5 s -> screenshot -> Alt+F4 -> 5 s ->
+    #   Enter (a "Quit Warp?" prompt cannot be detected, so Enter is sent
+    #   blind) -> 10 s -> kill with a WARNING. WM_CLOSE is never sent to a
+    #   dialog, because closing it would cancel the quit. Settings are only
+    #   reliably on disk after a graceful exit.
     param(
         [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
-        [Parameter(Mandatory = $true)][string]$Id
+        [Parameter(Mandatory = $true)][string]$Id,
+        [Parameter(Mandatory = $true)][bool]$ExpectWorkspace
     )
 
     $evidence = [System.Collections.Generic.List[string]]::new()
@@ -654,20 +682,29 @@ function Stop-WarpGracefully {
     [void](Close-ProcessWindow -ProcessId $Process.Id -ExcludeClass @('#32770'))
     if ($Process.WaitForExit(5000)) { return & $result $false "closed by WM_CLOSE, exit code $($Process.ExitCode)" }
 
+    if (-not $ExpectWorkspace) {
+        Stop-ProcessTree -Process $Process
+        return & $result $false 'INFO: killed during onboarding (no state to save)'
+    }
+
     $shot = Save-Screenshot -ProcessId $Process.Id -Name "$Id-close-prompt.png"
     if ($shot) { $evidence.Add($shot) }
-    for ($round = 1; $round -le 2; $round++) {
-        if ($round -eq 2) { [void](Close-ProcessWindow -ProcessId $Process.Id -ExcludeClass @('#32770')) }
-        try {
-            $window = Select-ModalWindow -ProcessId $Process.Id
-            if ($null -ne $window) { Send-Keys -Handle $window.Handle -Keys 'Enter' }
-        } catch {
-            Write-Host "  Enter for the quit prompt not sent: $($_.Exception.Message)"
-        }
-        if ($Process.WaitForExit(10000)) { return & $result $false "closed after the quit prompt was confirmed with Enter (round $round), exit code $($Process.ExitCode)" }
+    try {
+        $window = Select-ModalWindow -ProcessId $Process.Id
+        if ($null -ne $window) { Send-Keys -Handle $window.Handle -Keys 'Alt+F4' }
+    } catch {
+        Write-Host "  Alt+F4 not sent: $($_.Exception.Message)"
     }
+    if ($Process.WaitForExit(5000)) { return & $result $false "closed after Alt+F4, exit code $($Process.ExitCode)" }
+    try {
+        $window = Select-ModalWindow -ProcessId $Process.Id
+        if ($null -ne $window) { Send-Keys -Handle $window.Handle -Keys 'Enter' }
+    } catch {
+        Write-Host "  Enter for the quit prompt not sent: $($_.Exception.Message)"
+    }
+    if ($Process.WaitForExit(10000)) { return & $result $false "closed after Alt+F4 and Enter, exit code $($Process.ExitCode)" }
     Stop-ProcessTree -Process $Process
-    return & $result $true 'did not exit after WM_CLOSE and two Enter confirmations; killed'
+    return & $result $true 'did not exit after WM_CLOSE, Alt+F4 and Enter; killed'
 }
 
 function Get-BrowserProcessIds {
@@ -675,10 +712,12 @@ function Get-BrowserProcessIds {
 }
 
 function Complete-Onboarding {
-    # Fresh folder -> onboarding: welcome (Enter = Get started), a second slide
-    # (Enter continues), then the login slide. On the login slide a plain Enter
-    # STARTS BROWSER SIGN-IN, so Ctrl+Enter opens the skip dialog and Enter
-    # confirms "Skip for now" (app/src/auth/login_slide.rs). The caller has
+    # The real onboarding of a fresh folder: Welcome (Enter), Customize (Enter),
+    # theme (Down selects Light, which is also the A8 setting change; Enter),
+    # "Create an account" (Skip / Continue). Continue starts browser sign-in,
+    # so Ctrl+Enter opens the skip dialog and Enter confirms it
+    # (app/src/auth/login_slide.rs). The "Sign in on your browser" screen with
+    # the paste-token link is deliberately never reached. The caller has
     # already waited for the window plus 8 s. Never throws; returns the
     # screenshots taken and a note.
     param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
@@ -686,10 +725,12 @@ function Complete-Onboarding {
     $evidence = [System.Collections.Generic.List[string]]::new()
     $note = ''
     $steps = @(
-        @{ Shot = 'onb-1.png'; Keys = 'Enter'; Wait = 4 },
-        @{ Shot = 'onb-2.png'; Keys = 'Enter'; Wait = 4 },
-        @{ Shot = 'onb-3-login.png'; Keys = 'Ctrl+Enter'; Wait = 2 },
-        @{ Shot = 'onb-4-skip-dialog.png'; Keys = 'Enter'; Wait = 8 }
+        @{ Shot = 'onb-1-welcome.png'; Keys = 'Enter'; Wait = 4 },
+        @{ Shot = 'onb-2-customize.png'; Keys = 'Enter'; Wait = 4 },
+        @{ Shot = 'onb-3-theme.png'; Keys = 'Down'; Wait = 1 },
+        @{ Shot = 'onb-3b-theme-light.png'; Keys = 'Enter'; Wait = 4 },
+        @{ Shot = 'onb-4-account.png'; Keys = 'Ctrl+Enter'; Wait = 2 },
+        @{ Shot = 'onb-5-skip-dialog.png'; Keys = 'Enter'; Wait = 8 }
     )
     try {
         foreach ($step in $steps) {
@@ -701,9 +742,9 @@ function Complete-Onboarding {
             Send-Keys -Handle $window.Handle -Keys $step.Keys
             Start-Sleep -Seconds $step.Wait
         }
-        $shot = Save-Screenshot -ProcessId $Process.Id -Name 'onb-5-terminal.png'
+        $shot = Save-Screenshot -ProcessId $Process.Id -Name 'onb-6-after-skip.png'
         if ($shot) { $evidence.Add($shot) }
-        $note = 'Onboarding keys sent: Enter, Enter, Ctrl+Enter, Enter.'
+        $note = 'Onboarding keys sent: Enter, Enter, Down, Enter, Ctrl+Enter, Enter.'
     } catch {
         $note = "Onboarding sequence stopped: $($_.Exception.Message)."
     }
@@ -916,12 +957,13 @@ function Invoke-CheckA3 {
 }
 
 function Invoke-CheckA12a {
-    # Evidence only: the login slide ("Click here to paste your token from the
-    # browser") is in onb-3-login.png, but reading a screenshot needs a human
-    # (ADR-0008). Not faked as a pass.
+    # Evidence only (ADR-0008). onb-4-account.png is the "Create an account"
+    # slide, the sign-in entry point. The paste-token link is one step further
+    # (after Continue, "Sign in on your browser") and is not opened in
+    # automation, because Continue starts browser sign-in. Not faked as a pass.
     $evidence = @()
-    if ($script:Ctx.ContainsKey('A3Evidence')) { $evidence = @($script:Ctx.A3Evidence | Where-Object { $_ -eq 'onb-3-login.png' }) }
-    return New-CheckResult -Id 'A12a' -Status skipped -Evidence $evidence -Note 'onb-3-login.png is the login slide of the onboarding; whether the token-paste entry point is there is read from the screenshot, not asserted automatically (ADR-0008, owner verifies A12b).'
+    if ($script:Ctx.ContainsKey('A3Evidence')) { $evidence = @($script:Ctx.A3Evidence | Where-Object { $_ -eq 'onb-4-account.png' }) }
+    return New-CheckResult -Id 'A12a' -Status skipped -Evidence $evidence -Note 'onb-4-account.png shows the sign-in entry point (Create an account: Skip / Continue). The token-paste link is on the next screen (after Continue) and is deliberately not opened in automation; reading the screenshot is manual (ADR-0008, owner verifies A12b).'
 }
 
 function Invoke-CheckA4 {
@@ -1041,12 +1083,14 @@ function Invoke-CheckA5 {
         if ($inside.Count -eq 0 -and $outside.Count -eq 0) {
             $problems.Add("warp-oss.log not found anywhere (data tree: $(($tree | Select-Object -First 40) -join ' | '))")
         }
+        $killedNote = if ($script:Ctx.ContainsKey('AKilled') -and $script:Ctx.AKilled) { ' NOTE: folder A had to be killed, so the log may be unflushed.' } else { '' }
         if ($problems.Count -eq 0) {
             $status = 'pass'
             $note = "user_preferences.json and a sqlite database existed while running; $($inside[0].Name) found under data\state\logs after the graceful close; no warp-oss.log outside the folder."
         } else {
-            $note = $problems -join ' | '
+            $note = ($problems -join ' | ') + $killedNote
         }
+        if ($status -eq 'pass') { $note += $killedNote }
     } catch {
         $status = 'fail'
         $note = "Unexpected error: $($_.Exception.Message)"
@@ -1067,6 +1111,8 @@ function Get-SettingsSnapshot {
 }
 
 function Invoke-CheckA8a {
+    # The theme chosen during onboarding (Down = Light) is the setting change.
+    # Folder A is closed gracefully first, then the files are searched.
     $evidence = [System.Collections.Generic.List[string]]::new()
     $status = 'fail'
     $note = ''
@@ -1075,46 +1121,26 @@ function Invoke-CheckA8a {
         if ($null -eq $proc -or -not (Test-ProcessAlive -Process $proc)) {
             throw 'Prerequisite missing: warp-oss.exe from A3 is not running.'
         }
-        $before = Get-SettingsSnapshot -ExeDir $script:Ctx.DirA
-        [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-user_preferences.before.json'), $before.PrefsText)
-        [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-settings.before.toml'), $before.TomlText)
-        $evidence.Add('a8-user_preferences.before.json'); $evidence.Add('a8-settings.before.toml')
-
-        $window = Wait-ProcessWindow -ProcessId $proc.Id -TimeoutSeconds 10
-        if ($null -eq $window) { throw 'The Warp window disappeared.' }
-        # Ctrl+Shift+= is the font size; Ctrl+= is zoom (bindings.rs). Font size
-        # first, then zoom, three presses each so one eaten key does not matter.
-        foreach ($keys in @('Ctrl+Shift+=', 'Ctrl+=')) {
-            for ($i = 0; $i -lt 3; $i++) {
-                Send-Keys -Handle $window.Handle -Keys $keys
-                Start-Sleep -Milliseconds 700
-            }
-        }
-        Start-Sleep -Seconds 5
-        $shot = Save-Screenshot -ProcessId $proc.Id -Name 'a8-after-keys.png'
-        if ($shot) { $evidence.Add($shot) }
-
-        # Settings may only be flushed at exit, so close first, then compare.
-        $closed = Stop-WarpGracefully -Process $proc -Id 'a8a'
+        $closed = Stop-WarpGracefully -Process $proc -Id 'a8a' -ExpectWorkspace $true
+        $script:Ctx.AKilled = $closed.Forced
         foreach ($e in $closed.Evidence) { $evidence.Add($e) }
         $after = Get-SettingsSnapshot -ExeDir $script:Ctx.DirA
-        [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-user_preferences.after.json'), $after.PrefsText)
-        [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-settings.after.toml'), $after.TomlText)
-        $evidence.Add('a8-user_preferences.after.json'); $evidence.Add('a8-settings.after.toml')
+        [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-user_preferences.json'), $after.PrefsText)
+        [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-settings.toml'), $after.TomlText)
+        $evidence.Add('a8-user_preferences.json'); $evidence.Add('a8-settings.toml')
 
-        $diff = @(Get-SettingDiff -Before $before.Flat -After $after.Flat)
-        if ($diff.Count -eq 0) {
-            $note = "no setting change detected after Ctrl+Shift+= x3 and Ctrl+= x3 ($($closed.Note))"
+        $themes = @(Find-ThemeSetting -Flat $after.Flat)
+        if ($themes.Count -eq 0) {
+            $keys = (@($after.Flat.Keys) | Select-Object -First 15) -join ', '
+            $note = "no theme key with a Light value found in user_preferences.json / settings.toml ($($closed.Note)). Keys present: $keys"
         } else {
-            $pick = Select-FontSettingChange -Changes $diff
-            $script:Ctx.ChangedSettings = @($pick.Chosen)
-            $script:Ctx.ChangedSettingsFontSpecific = $pick.FontSpecific
+            $script:Ctx.ChangedSettings = $themes
+            $script:Ctx.ChangedSettingsFontSpecific = $true
             $status = 'pass'
-            $summary = ($pick.Chosen | Select-Object -First 5 | ForEach-Object { "$($_.Key): $($_.Before) -> $($_.After)" }) -join '; '
-            $kind = if ($pick.FontSpecific) { 'font-related' } else { 'NOT font-related (no font key changed; other changed keys recorded)' }
-            $note = "Changed settings ($kind): $summary. App $($closed.Note)."
+            $summary = ($themes | Select-Object -First 5 | ForEach-Object { "$($_.Key) = $($_.After)" }) -join '; '
+            $note = "Theme chosen in onboarding (Down = Light) was persisted: $summary. App $($closed.Note)."
         }
-        if ($closed.Forced) { $note += ' WARNING: the app had to be killed.' }
+        if ($closed.Forced) { $note += ' WARNING: the app had to be killed, so settings may not be fully flushed.' }
     } catch {
         $status = 'fail'
         $note = "Unexpected error: $($_.Exception.Message)"
@@ -1197,7 +1223,7 @@ function Invoke-CheckA8b {
         } else {
             # B is closed gracefully so anything it rewrites on exit is on disk
             # before the values are compared.
-            $closed = Stop-WarpGracefully -Process $procB -Id 'a8b'
+            $closed = Stop-WarpGracefully -Process $procB -Id 'a8b' -ExpectWorkspace $true
             foreach ($e in $closed.Evidence) { $evidence.Add($e) }
             $changed = @()
             if ($script:Ctx.ContainsKey('ChangedSettings')) { $changed = @($script:Ctx.ChangedSettings) }
@@ -1267,7 +1293,7 @@ function Invoke-CheckD4 {
     } finally {
         foreach ($p in @($procA2, $script:Ctx.ProcB)) {
             if ($null -ne $p) {
-                $closed = Stop-WarpGracefully -Process $p -Id "d4-$($p.Id)"
+                $closed = Stop-WarpGracefully -Process $p -Id "d4-$($p.Id)" -ExpectWorkspace $true
                 foreach ($e in $closed.Evidence) { $evidence.Add($e) }
                 if ($closed.Forced) { $note += " WARNING (pid $($p.Id)): $($closed.Note)" }
             }
@@ -1326,7 +1352,7 @@ function Invoke-CheckA9 {
         $note = "Unexpected error: $($_.Exception.Message)"
     } finally {
         if ($null -ne $proc) {
-            $closed = Stop-WarpGracefully -Process $proc -Id 'a9'
+            $closed = Stop-WarpGracefully -Process $proc -Id 'a9' -ExpectWorkspace $false
             foreach ($e in $closed.Evidence) { $evidence.Add($e) }
         }
         if ($dirC) { Stop-WarpProcessesIn -Folder $dirC }
@@ -1468,7 +1494,7 @@ function Invoke-CheckA10 {
 
         # Logs from the other user's run, copied while the folder still exists.
         if (Test-ProcessAlive -Process $proc) {
-            $closed = Stop-WarpGracefully -Process $proc -Id 'a10'
+            $closed = Stop-WarpGracefully -Process $proc -Id 'a10' -ExpectWorkspace $false
             foreach ($e in $closed.Evidence) { $evidence.Add($e) }
         }
         [void](Copy-FolderLogs -ExeDir $dirE -Label 'folder-E-standard-user')
