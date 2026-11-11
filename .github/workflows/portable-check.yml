@@ -81,6 +81,16 @@ jobs:
         shell: pwsh
         run: cargo clippy --locked -p warp_core --target $env:TARGET --all-targets --tests --features local_fs,portable -- -D warnings
 
+      - name: cargo clippy (warp-oss, portable)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: cargo clippy --locked -p warp --bin warp-oss --target $env:TARGET --features "$env:OSS_FEATURES,portable" -- -D warnings
+
+      - name: cargo test (app portable units)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: cargo test --locked -p warp --lib --target $env:TARGET --features "$env:OSS_FEATURES,portable" -- portable
+
       - name: Report runner disk (end)
         if: ${{ !cancelled() }}
         shell: pwsh
