@@ -152,8 +152,8 @@ function Compare-RegistryExport {
     # records executed programs under existing keys (AppCompatFlags, MuiCache)
     # and those lines mention the exe path without Warp having written them.
     param(
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$BeforeLines,
-        [Parameter(Mandatory = $true)][AllowEmptyCollection()][string[]]$AfterLines
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$BeforeLines,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()][AllowEmptyString()][string[]]$AfterLines
     )
 
     $known = [System.Collections.Generic.HashSet[string]]::new([string[]]$BeforeLines, [System.StringComparer]::Ordinal)
@@ -170,6 +170,13 @@ function Compare-RegistryExport {
         AddedKeys      = $addedKeys.ToArray()
         WarpKeys       = $warpKeys
     }
+}
+
+function Get-NewProcessIds {
+    # Ids present after but not before (browser guard).
+    param([AllowEmptyCollection()][int[]]$Before = @(), [AllowEmptyCollection()][int[]]$After = @())
+    $known = [System.Collections.Generic.HashSet[int]]::new([int[]]@($Before))
+    return @($After | Where-Object { -not $known.Contains($_) })
 }
 
 function ConvertTo-FlatSettings {
@@ -394,6 +401,31 @@ function Invoke-SelfTest {
     Assert-Equal $reg.WarpKeys.Count 1 'only the Warp key header is a Warp finding (value lines are ignored)'
     Assert-Equal $reg.AddedLineCount 5 'added registry lines'
 
+    # Registry export with blank lines and an empty export must not throw
+    $regBlank = @('Windows Registry Editor Version 5.00', '', '[HKEY_CURRENT_USER\A]', '')
+    $regOk = Compare-RegistryExport -BeforeLines $regBlank -AfterLines ($regBlank + @('', '[HKEY_CURRENT_USER\B]'))
+    Assert-Equal $regOk.AddedKeys.Count 1 'registry diff with blank lines'
+    $regEmpty = Compare-RegistryExport -BeforeLines @() -AfterLines @('', '[HKEY_CURRENT_USER\Software\Warp.dev]')
+    Assert-Equal $regEmpty.WarpKeys.Count 1 'registry diff with an empty before export'
+    $regNone = Compare-RegistryExport -BeforeLines @() -AfterLines @()
+    Assert-Equal $regNone.AddedLineCount 0 'registry diff of two empty exports'
+
+    # Profile excludes
+    $ex = Get-DefaultProfileExcludes -ProfileDir 'C:\Users\runneradmin' -Extra @('D:\a\_temp\Portable Test', $null)
+    foreach ($noise in @('AppData\Local\Microsoft\Edge\User Data\Default\LOG', 'AppData\Local\Microsoft\EdgeUpdate\Log\x.log',
+            'AppData\Local\Packages\Foo\a.db', 'AppData\Local\ConnectedDevicesPlatform\x', 'AppData\Local\Microsoft\Windows\Explorer\iconcache.db',
+            'AppData\Roaming\Microsoft\Windows\Recent\a.lnk', 'AppData\Local\Temp\x', 'NTUSER.DAT.LOG1')) {
+        Assert-Equal (Test-PathExcluded -Path ('C:\Users\runneradmin\' + $noise) -ExcludePrefix $ex) $true "excluded noise: $noise"
+    }
+    foreach ($real in @('AppData\Roaming\warp\x.json', 'AppData\Local\warp\y', '.warp-oss\z', 'AppData\Local\Microsoft\EdgeFoo\x')) {
+        Assert-Equal (Test-PathExcluded -Path ('C:\Users\runneradmin\' + $real) -ExcludePrefix $ex) $false "not excluded: $real"
+    }
+
+    # Browser guard
+    $newIds = @(Get-NewProcessIds -Before @(1, 2) -After @(2, 3, 4))
+    Assert-Equal ($newIds -join ',') '3,4' 'new process ids'
+    Assert-Equal @(Get-NewProcessIds -Before @() -After @()).Count 0 'no processes, no new ids'
+
     # Settings flattening and diff
     $jsonBefore = '{"FontSize": 13, "Theme": "dark", "Nested": {"a": [1, 2]}}'
     $jsonAfter = '{"FontSize": 14, "Theme": "dark", "Nested": {"a": [1, 3]}, "New": true}'
@@ -500,32 +532,37 @@ function Export-HkcuRegistry {
 
 function Get-DefaultProfileExcludes {
     # Writes that are acceptable by the brief (%TEMP%, GPU shader caches) plus
-    # background noise of Windows and PowerShell itself on a CI runner. Each
-    # entry is a prefix; directories end with a separator.
+    # background noise of Windows, Edge and PowerShell itself on a CI runner.
+    # Each entry is a prefix; directories end with a backslash. Built by string
+    # concatenation (Windows paths only) so the self test can run anywhere.
     param([Parameter(Mandatory = $true)][string]$ProfileDir, [string[]]$Extra = @())
 
-    $local = Join-Path -Path $ProfileDir -ChildPath 'AppData\Local'
-    $roaming = Join-Path -Path $ProfileDir -ChildPath 'AppData\Roaming'
+    $local = $ProfileDir.TrimEnd('\') + '\AppData\Local\'
+    $roaming = $ProfileDir.TrimEnd('\') + '\AppData\Roaming\'
     $dirs = @(
-        (Join-Path $local 'Temp'),
-        (Join-Path $local 'D3DSCache'),
-        (Join-Path $local 'NVIDIA'),
-        (Join-Path $local 'AMD'),
-        (Join-Path $local 'Microsoft\Windows\INetCache'),
-        (Join-Path $local 'Microsoft\Windows\Explorer'),
-        (Join-Path $local 'Microsoft\Windows\WER'),
-        (Join-Path $local 'Microsoft\Windows\WebCache'),
-        (Join-Path $local 'Microsoft\Windows\Caches'),
-        (Join-Path $local 'Microsoft\Windows\PowerShell'),
-        (Join-Path $local 'Microsoft\CLR_v4.0'),
-        (Join-Path $local 'Microsoft\CLR_v4.0_32'),
-        (Join-Path $local 'Microsoft\PowerShell'),
-        (Join-Path $local 'CrashDumps'),
-        (Join-Path $roaming 'Microsoft\Windows\Recent'),
-        (Join-Path $roaming 'Microsoft\Windows\PowerShell'),
-        (Join-Path $roaming 'Microsoft\Windows\Start Menu')
-    ) | ForEach-Object { $_ + [System.IO.Path]::DirectorySeparatorChar }
-    $files = @((Join-Path $ProfileDir 'NTUSER.DAT'), (Join-Path $ProfileDir 'ntuser.ini'))
+        ($local + 'Temp\'),
+        ($local + 'D3DSCache\'),
+        ($local + 'NVIDIA\'),
+        ($local + 'AMD\'),
+        ($local + 'Microsoft\Windows\INetCache\'),
+        ($local + 'Microsoft\Windows\Explorer\'),
+        ($local + 'Microsoft\Windows\WER\'),
+        ($local + 'Microsoft\Windows\WebCache\'),
+        ($local + 'Microsoft\Windows\Caches\'),
+        ($local + 'Microsoft\Windows\PowerShell\'),
+        ($local + 'Microsoft\CLR_v4.0\'),
+        ($local + 'Microsoft\CLR_v4.0_32\'),
+        ($local + 'Microsoft\PowerShell\'),
+        ($local + 'Microsoft\Edge\'),
+        ($local + 'Microsoft\EdgeUpdate\'),
+        ($local + 'Packages\'),
+        ($local + 'ConnectedDevicesPlatform\'),
+        ($local + 'CrashDumps\'),
+        ($roaming + 'Microsoft\Windows\Recent\'),
+        ($roaming + 'Microsoft\Windows\PowerShell\'),
+        ($roaming + 'Microsoft\Windows\Start Menu\')
+    )
+    $files = @(($ProfileDir.TrimEnd('\') + '\NTUSER.DAT'), ($ProfileDir.TrimEnd('\') + '\ntuser.ini'))
     $more = @($Extra | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') + '\' })
     return @($dirs + $files + $more)
 }
@@ -566,12 +603,14 @@ function Start-WarpApp {
     # Started with the folder as working directory, like a double-click.
     param(
         [Parameter(Mandatory = $true)][string]$ExeDir,
-        [pscredential]$Credential
+        [pscredential]$Credential,
+        [string]$WorkingDirectory
     )
 
+    if (-not $WorkingDirectory) { $WorkingDirectory = $ExeDir }
     $exe = Join-Path -Path $ExeDir -ChildPath 'warp-oss.exe'
     if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw "warp-oss.exe not found in $ExeDir" }
-    $arguments = @{ FilePath = $exe; WorkingDirectory = $ExeDir; PassThru = $true }
+    $arguments = @{ FilePath = $exe; WorkingDirectory = $WorkingDirectory; PassThru = $true }
     if ($null -ne $Credential) {
         $arguments['Credential'] = $Credential
         $arguments['LoadUserProfile'] = $true
@@ -582,19 +621,93 @@ function Start-WarpApp {
     return $process
 }
 
-function Close-WarpApp {
-    # WM_CLOSE like the X button, wait for exit, kill after the timeout and say so.
-    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+function Select-ModalWindow {
+    # The quit warning may be a native dialog (#32770) or part of the main
+    # window; prefer the dialog when there is one.
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
 
-    if (-not (Test-ProcessAlive -Process $Process)) {
-        return [pscustomobject]@{ Forced = $false; Note = 'already exited' }
+    $windows = @(Get-ProcessWindows -ProcessId $ProcessId -MinSize 0)
+    $dialog = @($windows | Where-Object { $_.ClassName -eq '#32770' })
+    if ($dialog.Count -gt 0) { return $dialog[0] }
+    if ($windows.Count -gt 0) { return $windows[0] }
+    return $null
+}
+
+function Stop-WarpGracefully {
+    # Closes like a user: WM_CLOSE, then Enter to confirm the quit warning that
+    # Warp shows while a session is running (show_warning_before_quitting).
+    # WM_CLOSE is never sent to the dialog itself, because closing it would
+    # cancel the quit. Settings are only reliably on disk after a graceful exit.
+    #   WM_CLOSE -> 5 s -> screenshot + Enter -> 10 s -> WM_CLOSE + Enter -> 10 s -> kill.
+    param(
+        [Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process,
+        [Parameter(Mandatory = $true)][string]$Id
+    )
+
+    $evidence = [System.Collections.Generic.List[string]]::new()
+    $result = {
+        param([bool]$Forced, [string]$Note)
+        [pscustomobject]@{ Forced = $Forced; Note = $Note; Evidence = $evidence.ToArray() }
     }
-    [void](Close-ProcessWindow -ProcessId $Process.Id)
-    if ($Process.WaitForExit($script:CloseTimeout * 1000)) {
-        return [pscustomobject]@{ Forced = $false; Note = "closed gracefully, exit code $($Process.ExitCode)" }
+    if (-not (Test-ProcessAlive -Process $Process)) { return & $result $false 'already exited' }
+
+    [void](Close-ProcessWindow -ProcessId $Process.Id -ExcludeClass @('#32770'))
+    if ($Process.WaitForExit(5000)) { return & $result $false "closed by WM_CLOSE, exit code $($Process.ExitCode)" }
+
+    $shot = Save-Screenshot -ProcessId $Process.Id -Name "$Id-close-prompt.png"
+    if ($shot) { $evidence.Add($shot) }
+    for ($round = 1; $round -le 2; $round++) {
+        if ($round -eq 2) { [void](Close-ProcessWindow -ProcessId $Process.Id -ExcludeClass @('#32770')) }
+        try {
+            $window = Select-ModalWindow -ProcessId $Process.Id
+            if ($null -ne $window) { Send-Keys -Handle $window.Handle -Keys 'Enter' }
+        } catch {
+            Write-Host "  Enter for the quit prompt not sent: $($_.Exception.Message)"
+        }
+        if ($Process.WaitForExit(10000)) { return & $result $false "closed after the quit prompt was confirmed with Enter (round $round), exit code $($Process.ExitCode)" }
     }
     Stop-ProcessTree -Process $Process
-    return [pscustomobject]@{ Forced = $true; Note = "did not exit within $($script:CloseTimeout) s after WM_CLOSE; killed" }
+    return & $result $true 'did not exit after WM_CLOSE and two Enter confirmations; killed'
+}
+
+function Get-BrowserProcessIds {
+    return @(Get-Process -Name 'msedge', 'chrome', 'firefox' -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+}
+
+function Complete-Onboarding {
+    # Fresh folder -> onboarding: welcome (Enter = Get started), a second slide
+    # (Enter continues), then the login slide. On the login slide a plain Enter
+    # STARTS BROWSER SIGN-IN, so Ctrl+Enter opens the skip dialog and Enter
+    # confirms "Skip for now" (app/src/auth/login_slide.rs). The caller has
+    # already waited for the window plus 8 s. Never throws; returns the
+    # screenshots taken and a note.
+    param([Parameter(Mandatory = $true)][System.Diagnostics.Process]$Process)
+
+    $evidence = [System.Collections.Generic.List[string]]::new()
+    $note = ''
+    $steps = @(
+        @{ Shot = 'onb-1.png'; Keys = 'Enter'; Wait = 4 },
+        @{ Shot = 'onb-2.png'; Keys = 'Enter'; Wait = 4 },
+        @{ Shot = 'onb-3-login.png'; Keys = 'Ctrl+Enter'; Wait = 2 },
+        @{ Shot = 'onb-4-skip-dialog.png'; Keys = 'Enter'; Wait = 8 }
+    )
+    try {
+        foreach ($step in $steps) {
+            if (-not (Test-ProcessAlive -Process $Process)) { throw "process exited before $($step.Shot)" }
+            $shot = Save-Screenshot -ProcessId $Process.Id -Name $step.Shot
+            if ($shot) { $evidence.Add($shot) }
+            $window = Wait-ProcessWindow -ProcessId $Process.Id -TimeoutSeconds 5
+            if ($null -eq $window) { throw "no window for $($step.Keys) after $($step.Shot)" }
+            Send-Keys -Handle $window.Handle -Keys $step.Keys
+            Start-Sleep -Seconds $step.Wait
+        }
+        $shot = Save-Screenshot -ProcessId $Process.Id -Name 'onb-5-terminal.png'
+        if ($shot) { $evidence.Add($shot) }
+        $note = 'Onboarding keys sent: Enter, Enter, Ctrl+Enter, Enter.'
+    } catch {
+        $note = "Onboarding sequence stopped: $($_.Exception.Message)."
+    }
+    return [pscustomobject]@{ Evidence = $evidence.ToArray(); Note = $note }
 }
 
 function Wait-Condition {
@@ -736,6 +849,7 @@ function Invoke-CheckS0 {
         $script:Ctx.RegBeforePath = Join-Path -Path $script:Ctx.WorkRoot -ChildPath 'reg-before.reg'
         try {
             $script:Ctx.RegBeforeLines = Export-HkcuRegistry -Path $script:Ctx.RegBeforePath
+            $note = "HKCU export: $(@($script:Ctx.RegBeforeLines).Count) lines. "
         } catch {
             $script:Ctx.RegBeforeLines = $null
             $note = "HKCU export failed ($($_.Exception.Message)); registry diff will not be available. "
@@ -770,14 +884,10 @@ function Invoke-CheckA3 {
         $env:WP_MARKER = Join-Path -Path $script:Ctx.WorkRoot -ChildPath 'a4-marker.txt'
         $env:WP_OK = 'warp-portable-ok'
 
+        $script:Ctx.BrowsersBefore = @(Get-BrowserProcessIds)
         $script:Ctx.ProcA = Start-WarpApp -ExeDir $dirA
         $window = Wait-ProcessWindow -ProcessId $script:Ctx.ProcA.Id -TimeoutSeconds $script:WindowTimeout
-        if ($null -ne $window) {
-            Start-Sleep -Seconds 5
-            $shot = Save-Screenshot -ProcessId $script:Ctx.ProcA.Id -Name 'a3-first-start.png'
-            if ($shot) { $evidence.Add($shot) }
-            Start-Sleep -Seconds ($script:SettleSeconds - 5)
-        }
+        if ($null -ne $window) { Start-Sleep -Seconds 8 }
         $alive = Test-ProcessAlive -Process $script:Ctx.ProcA
         if ($null -eq $window) {
             $note = if ($alive) { "No visible window within $($script:WindowTimeout) s (path with spaces: $dirA)" } else { "Process exited with code $($script:Ctx.ProcA.ExitCode) before any window appeared" }
@@ -785,17 +895,12 @@ function Invoke-CheckA3 {
             $note = "Process exited with code $($script:Ctx.ProcA.ExitCode) after the window appeared"
         } else {
             $status = 'pass'
-            $note = "Started from '$dirA': window '$($window.Title)' ($($window.Width)x$($window.Height)), process alive after $($script:SettleSeconds) s."
-            # Dismiss attempt for onboarding / sign-in: only Escape. Tab/Enter
-            # guesses are not reliable, so the screenshots are the record.
-            try {
-                Send-Keys -Handle $window.Handle -Keys 'Escape'
-                Start-Sleep -Seconds 3
-                $shot = Save-Screenshot -ProcessId $script:Ctx.ProcA.Id -Name 'a3-after-escape.png'
-                if ($shot) { $evidence.Add($shot) }
-            } catch {
-                $note += " Escape not sent: $($_.Exception.Message)"
-            }
+            $note = "Started from '$dirA': window '$($window.Title)' ($($window.Width)x$($window.Height)), process alive 8 s after the window appeared."
+            # Not part of the verdict: A3 is about starting. Onboarding is
+            # what lets A4 type into a terminal.
+            $onboarding = Complete-Onboarding -Process $script:Ctx.ProcA
+            foreach ($e in $onboarding.Evidence) { $evidence.Add($e) }
+            $note += ' ' + $onboarding.Note
         }
     } catch {
         $status = 'fail'
@@ -806,17 +911,17 @@ function Invoke-CheckA3 {
             Stop-ProcessTree -Process $script:Ctx.ProcA
         }
     }
-    # Kept so A12a can point at the same screenshots.
     $script:Ctx.A3Evidence = $evidence.ToArray()
     return New-CheckResult -Id 'A3' -Status $status -Evidence $evidence.ToArray() -Note $note
 }
 
 function Invoke-CheckA12a {
-    # Evidence only: whether the first screen is a sign-in entry point needs a
-    # human to look at it (ADR-0008). Not faked as a pass.
+    # Evidence only: the login slide ("Click here to paste your token from the
+    # browser") is in onb-3-login.png, but reading a screenshot needs a human
+    # (ADR-0008). Not faked as a pass.
     $evidence = @()
-    if ($script:Ctx.ContainsKey('A3Evidence')) { $evidence = @($script:Ctx.A3Evidence) }
-    return New-CheckResult -Id 'A12a' -Status skipped -Evidence $evidence -Note 'Screenshots of the first screen are recorded for review; whether the sign-in entry point is reachable is not asserted automatically (ADR-0008, owner verifies A12b).'
+    if ($script:Ctx.ContainsKey('A3Evidence')) { $evidence = @($script:Ctx.A3Evidence | Where-Object { $_ -eq 'onb-3-login.png' }) }
+    return New-CheckResult -Id 'A12a' -Status skipped -Evidence $evidence -Note 'onb-3-login.png is the login slide of the onboarding; whether the token-paste entry point is there is read from the screenshot, not asserted automatically (ADR-0008, owner verifies A12b).'
 }
 
 function Invoke-CheckA4 {
@@ -851,6 +956,9 @@ function Invoke-CheckA4 {
         }
         $shot = Save-Screenshot -ProcessId $proc.Id -Name 'a4-powershell.png'
         if ($shot) { $evidence.Add($shot) }
+        # Browser guard: a browser appearing means a key reached the sign-in button.
+        $newBrowsers = @(Get-NewProcessIds -Before @($script:Ctx.BrowsersBefore) -After @(Get-BrowserProcessIds))
+        if ($newBrowsers.Count -gt 0) { $script:Ctx.BrowserOpened = $true }
         if (-not $found) {
             $note = "Marker file did not appear within $($script:MarkerTimeout) s ($attempts attempts). Typing probably did not reach a PowerShell prompt (onboarding or sign-in screen in front?); see the screenshots."
         } else {
@@ -862,6 +970,10 @@ function Invoke-CheckA4 {
                 $note = "Marker file exists but has unexpected content: $($text -replace '\s+', ' ')"
             }
         }
+        if ($script:Ctx.BrowserOpened) {
+            $status = 'fail'
+            $note += ' A browser was opened (new msedge/chrome/firefox process): onboarding keys reached the sign-in button.'
+        }
     } catch {
         $status = 'fail'
         $note = "Unexpected error: $($_.Exception.Message)"
@@ -869,37 +981,77 @@ function Invoke-CheckA4 {
     return New-CheckResult -Id 'A4' -Status $status -Evidence $evidence.ToArray() -Note $note
 }
 
+function Save-A5RunningState {
+    # While the app runs: config and sqlite must already exist. The log file is
+    # judged after the graceful close (it may not be flushed yet).
+    $dir = $script:Ctx.DirA
+    $state = @{ Prefs = $false; Db = $false }
+    if ($dir) {
+        $prefs = Join-Path $dir 'data\config\user_preferences.json'
+        $state.Prefs = Wait-Condition -TimeoutSeconds 30 -Condition { Test-Path -LiteralPath $prefs -PathType Leaf }
+        $stateDir = Join-Path $dir 'data\state'
+        if (Test-Path -LiteralPath $stateDir) {
+            $state.Db = @(Get-ChildItem -LiteralPath $stateDir -Recurse -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Extension -in '.sqlite', '.sqlite3', '.db' }).Count -gt 0
+        }
+    }
+    $script:Ctx.A5Running = $state
+}
+
 function Invoke-CheckA5 {
+    # Runs after A8a, i.e. after the graceful close, so the log has been flushed.
+    $evidence = [System.Collections.Generic.List[string]]::new()
     $status = 'fail'
     $note = ''
     try {
         $dir = $script:Ctx.DirA
         if (-not $dir) { throw 'Prerequisite missing: folder A was not extracted.' }
-        $prefs = Join-Path $dir 'data\config\user_preferences.json'
-        $log = Join-Path $dir 'data\state\logs\warp-oss.log'
-        [void](Wait-Condition -TimeoutSeconds 30 -Condition { (Test-Path -LiteralPath $prefs) -and (Test-Path -LiteralPath $log) })
-        $stateDir = Join-Path $dir 'data\state'
-        $db = @()
-        if (Test-Path -LiteralPath $stateDir) {
-            $db = @(Get-ChildItem -LiteralPath $stateDir -Recurse -File -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Extension -in '.sqlite', '.sqlite3', '.db' })
+        $dataDir = Join-Path $dir 'data'
+        $tree = @()
+        if (Test-Path -LiteralPath $dataDir) {
+            $tree = @(Get-ChildItem -LiteralPath $dataDir -Recurse -Force -ErrorAction SilentlyContinue |
+                    ForEach-Object { "{0,12}  {1}" -f $(if ($_.PSIsContainer) { '<dir>' } else { $_.Length }), [System.IO.Path]::GetRelativePath($dir, $_.FullName) })
         }
-        $missing = [System.Collections.Generic.List[string]]::new()
-        if (-not (Test-Path -LiteralPath $prefs -PathType Leaf)) { $missing.Add('data\config\user_preferences.json') }
-        if (-not (Test-Path -LiteralPath $log -PathType Leaf)) { $missing.Add('data\state\logs\warp-oss.log') }
-        if ($db.Count -eq 0) { $missing.Add('a sqlite database (*.sqlite, *.sqlite3, *.db) under data\state') }
-        if ($missing.Count -eq 0) {
+        [System.IO.File]::WriteAllLines((Join-Path $script:Ctx.ReportDir 'a5-data-tree.txt'), [string[]]$tree)
+        $evidence.Add('a5-data-tree.txt')
+
+        $running = $script:Ctx.A5Running
+        $prefsNow = Test-Path -LiteralPath (Join-Path $dir 'data\config\user_preferences.json') -PathType Leaf
+        $dbNow = @(Get-ChildItem -LiteralPath (Join-Path $dir 'data\state') -Recurse -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -in '.sqlite', '.sqlite3', '.db' }).Count -gt 0
+        $problems = [System.Collections.Generic.List[string]]::new()
+        if (-not ($prefsNow -and ($null -ne $running -and $running.Prefs))) { $problems.Add('data\config\user_preferences.json missing (while running or after close)') }
+        if (-not ($dbNow -and ($null -ne $running -and $running.Db))) { $problems.Add('no sqlite database under data\state (while running or after close)') }
+
+        $logsDir = Join-Path $dir 'data\state\logs'
+        $inside = @()
+        if (Test-Path -LiteralPath $logsDir) {
+            $inside = @(Get-ChildItem -LiteralPath $logsDir -Recurse -File -Filter 'warp-oss.log*' -ErrorAction SilentlyContinue)
+        }
+        # A log anywhere else would mean Warp's state escaped the folder.
+        $outside = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($root in @($env:TEMP, $env:LOCALAPPDATA, $env:APPDATA)) {
+            if (-not $root -or -not (Test-Path -LiteralPath $root)) { continue }
+            foreach ($f in @(Get-ChildItem -LiteralPath $root -Recurse -Depth 4 -File -Force -Filter 'warp-oss.log*' -ErrorAction SilentlyContinue)) {
+                if ($f.FullName.StartsWith($script:Ctx.WorkRoot, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+                $outside[$f.FullName] = $f.FullName
+            }
+        }
+        if ($outside.Count -gt 0) { $problems.Add("warp-oss.log found outside the folder: $(@($outside.Keys) -join '; ')") }
+        if ($inside.Count -eq 0 -and $outside.Count -eq 0) {
+            $problems.Add("warp-oss.log not found anywhere (data tree: $(($tree | Select-Object -First 40) -join ' | '))")
+        }
+        if ($problems.Count -eq 0) {
             $status = 'pass'
-            $note = "Found user_preferences.json, warp-oss.log and $($db[0].Name) under $dir\data."
+            $note = "user_preferences.json and a sqlite database existed while running; $($inside[0].Name) found under data\state\logs after the graceful close; no warp-oss.log outside the folder."
         } else {
-            $listing = (Get-ChildItem -LiteralPath (Join-Path $dir 'data') -Recurse -File -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { [System.IO.Path]::GetRelativePath($dir, $_.FullName) }) -join '; '
-            $note = "Missing: $($missing -join ', '). Files under data (first 40): $listing"
+            $note = $problems -join ' | '
         }
     } catch {
         $status = 'fail'
         $note = "Unexpected error: $($_.Exception.Message)"
     }
-    return New-CheckResult -Id 'A5' -Status $status -Note $note
+    return New-CheckResult -Id 'A5' -Status $status -Evidence $evidence.ToArray() -Note $note
 }
 
 function Get-SettingsSnapshot {
@@ -930,17 +1082,21 @@ function Invoke-CheckA8a {
 
         $window = Wait-ProcessWindow -ProcessId $proc.Id -TimeoutSeconds 10
         if ($null -eq $window) { throw 'The Warp window disappeared.' }
-        # Three steps so a change is visible even if the first keypress is eaten.
-        for ($i = 0; $i -lt 3; $i++) {
-            Send-Keys -Handle $window.Handle -Keys 'Ctrl+='
-            Start-Sleep -Milliseconds 700
+        # Ctrl+Shift+= is the font size; Ctrl+= is zoom (bindings.rs). Font size
+        # first, then zoom, three presses each so one eaten key does not matter.
+        foreach ($keys in @('Ctrl+Shift+=', 'Ctrl+=')) {
+            for ($i = 0; $i -lt 3; $i++) {
+                Send-Keys -Handle $window.Handle -Keys $keys
+                Start-Sleep -Milliseconds 700
+            }
         }
         Start-Sleep -Seconds 5
-        $shot = Save-Screenshot -ProcessId $proc.Id -Name 'a8-after-ctrl-equals.png'
+        $shot = Save-Screenshot -ProcessId $proc.Id -Name 'a8-after-keys.png'
         if ($shot) { $evidence.Add($shot) }
 
         # Settings may only be flushed at exit, so close first, then compare.
-        $closed = Close-WarpApp -Process $proc
+        $closed = Stop-WarpGracefully -Process $proc -Id 'a8a'
+        foreach ($e in $closed.Evidence) { $evidence.Add($e) }
         $after = Get-SettingsSnapshot -ExeDir $script:Ctx.DirA
         [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-user_preferences.after.json'), $after.PrefsText)
         [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8-settings.after.toml'), $after.TomlText)
@@ -948,7 +1104,7 @@ function Invoke-CheckA8a {
 
         $diff = @(Get-SettingDiff -Before $before.Flat -After $after.Flat)
         if ($diff.Count -eq 0) {
-            $note = "no setting change detected after Ctrl+= x3 ($($closed.Note))"
+            $note = "no setting change detected after Ctrl+Shift+= x3 and Ctrl+= x3 ($($closed.Note))"
         } else {
             $pick = Select-FontSettingChange -Changes $diff
             $script:Ctx.ChangedSettings = @($pick.Chosen)
@@ -985,7 +1141,7 @@ function Invoke-TraceCheck {
             $problems.Add($f)
         }
 
-        if ($null -ne $script:Ctx.RegBeforeLines) {
+        if ($null -ne $script:Ctx.RegBeforeLines -and @($script:Ctx.RegBeforeLines).Count -gt 0) {
             try {
                 $afterLines = Export-HkcuRegistry -Path (Join-Path $script:Ctx.WorkRoot "reg-$Tag-after.reg")
                 $reg = Compare-RegistryExport -BeforeLines $script:Ctx.RegBeforeLines -AfterLines $afterLines
@@ -994,15 +1150,16 @@ function Invoke-TraceCheck {
                 [System.IO.File]::WriteAllLines((Join-Path $script:Ctx.ReportDir $regFile), [string[]]$regText)
                 $evidence.Add($regFile)
                 foreach ($k in $reg.WarpKeys) { $problems.Add("registry key created: $k") }
-                $notes.Add("registry: $($reg.AddedKeys.Count) new keys (informational), $($reg.WarpKeys.Count) mention Warp")
+                $notes.Add("registry: export $(@($script:Ctx.RegBeforeLines).Count) -> $(@($afterLines).Count) lines, $($reg.AddedKeys.Count) new keys (informational), $($reg.WarpKeys.Count) mention Warp")
             } catch {
                 $notes.Add("registry diff not available: $($_.Exception.Message)")
             }
         } else {
-            $notes.Add('registry diff not available (HKCU export failed in S0)')
+            $notes.Add('registry diff not available (HKCU export failed or was empty in S0)')
         }
 
         $excludes = Get-DefaultProfileExcludes -ProfileDir $env:USERPROFILE -Extra @($script:Ctx.WorkRoot, $script:Ctx.ReportDir, $env:TEMP, $env:PUBLIC)
+        if ($script:Ctx.BrowserOpened) { $notes.Add('a browser was opened during A3/A4 (see A4): browser profile files are expected noise') }
         $changes = @(Get-ProfileChanges -Root $env:USERPROFILE -Since $script:Ctx.T0.AddSeconds(-2) -ExcludePrefix $excludes)
         $fsFile = "$Tag-profile-changes.txt"
         [System.IO.File]::WriteAllLines((Join-Path $script:Ctx.ReportDir $fsFile), [string[]]$changes)
@@ -1026,17 +1183,22 @@ function Invoke-CheckA8b {
     $evidence = [System.Collections.Generic.List[string]]::new()
     $status = 'fail'
     $note = ''
+    $procB = $null
     try {
         if (-not $script:Ctx.DirA) { throw 'Prerequisite missing: folder A was not extracted.' }
         $rootB = Join-Path -Path $script:Ctx.WorkRoot -ChildPath 'Folder B (copy)'
         $script:Ctx.DirB = Copy-PortableFolder -SourceExeDir $script:Ctx.DirA -DestRoot $rootB
-        $script:Ctx.ProcB = Start-WarpApp -ExeDir $script:Ctx.DirB
-        $start = Wait-AppStart -Process $script:Ctx.ProcB
-        $shot = Save-Screenshot -ProcessId $script:Ctx.ProcB.Id -Name 'a8b-folder-b.png'
+        $procB = Start-WarpApp -ExeDir $script:Ctx.DirB
+        $start = Wait-AppStart -Process $procB
+        $shot = Save-Screenshot -ProcessId $procB.Id -Name 'a8b-folder-b.png'
         if ($shot) { $evidence.Add($shot) }
         if (-not $start.Ok) {
             $note = "Copy did not start: $($start.Detail)"
         } else {
+            # B is closed gracefully so anything it rewrites on exit is on disk
+            # before the values are compared.
+            $closed = Stop-WarpGracefully -Process $procB -Id 'a8b'
+            foreach ($e in $closed.Evidence) { $evidence.Add($e) }
             $changed = @()
             if ($script:Ctx.ContainsKey('ChangedSettings')) { $changed = @($script:Ctx.ChangedSettings) }
             if ($changed.Count -eq 0) {
@@ -1044,27 +1206,28 @@ function Invoke-CheckA8b {
             } else {
                 $snap = Get-SettingsSnapshot -ExeDir $script:Ctx.DirB
                 [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8b-user_preferences.json'), $snap.PrefsText)
-                $evidence.Add('a8b-user_preferences.json')
+                [System.IO.File]::WriteAllText((Join-Path $script:Ctx.ReportDir 'a8b-settings.toml'), $snap.TomlText)
+                $evidence.Add('a8b-user_preferences.json'); $evidence.Add('a8b-settings.toml')
                 $present = @($changed | Where-Object { $snap.Flat.Contains($_.Key) -and [string]$snap.Flat[$_.Key] -eq $_.After })
                 # With a font key every changed value must survive. Without one
                 # the set may contain incidental keys, so one match is enough.
                 $needed = if ($script:Ctx.ChangedSettingsFontSpecific) { $changed.Count } else { 1 }
+                $keys = ($changed | Select-Object -First 3 | ForEach-Object { $_.Key }) -join ', '
                 if ($present.Count -ge $needed) {
                     $status = 'pass'
-                    $note = "In the copy (started from '$($script:Ctx.DirB)', alive, $($start.Detail)): $($present.Count) of $($changed.Count) changed values present, e.g. $($present[0].Key) = $($present[0].After)."
+                    $note = "In the copy (started from '$($script:Ctx.DirB)', $($start.Detail); $($closed.Note)) after it ran and closed: $($present.Count) of $($changed.Count) changed values unchanged, e.g. $($present[0].Key) = $($present[0].After)."
                 } else {
-                    $note = "Changed values missing in the copy: $($present.Count) of $($changed.Count) present."
+                    $note = "Changed values missing in the copy after it ran and closed: $($present.Count) of $($changed.Count) present (keys: $keys)."
                 }
+                if ($closed.Forced) { $note += " WARNING: $($closed.Note)" }
             }
         }
     } catch {
         $status = 'fail'
         $note = "Unexpected error: $($_.Exception.Message)"
     } finally {
-        # B stays running for D4, which closes it. A failed start must not linger.
-        if ($status -ne 'pass' -and $null -ne $script:Ctx.ProcB -and -not (Test-ProcessAlive -Process $script:Ctx.ProcB)) {
-            $script:Ctx.ProcB = $null
-        }
+        if ($null -ne $procB) { Stop-ProcessTree -Process $procB }
+        if ($script:Ctx.DirB) { Stop-WarpProcessesIn -Folder $script:Ctx.DirB }
     }
     return New-CheckResult -Id 'A8b' -Status $status -Evidence $evidence.ToArray() -Note $note
 }
@@ -1104,7 +1267,8 @@ function Invoke-CheckD4 {
     } finally {
         foreach ($p in @($procA2, $script:Ctx.ProcB)) {
             if ($null -ne $p) {
-                $closed = Close-WarpApp -Process $p
+                $closed = Stop-WarpGracefully -Process $p -Id "d4-$($p.Id)"
+                foreach ($e in $closed.Evidence) { $evidence.Add($e) }
                 if ($closed.Forced) { $note += " WARNING (pid $($p.Id)): $($closed.Note)" }
             }
         }
@@ -1161,7 +1325,10 @@ function Invoke-CheckA9 {
         $status = 'fail'
         $note = "Unexpected error: $($_.Exception.Message)"
     } finally {
-        if ($null -ne $proc) { [void](Close-WarpApp -Process $proc) }
+        if ($null -ne $proc) {
+            $closed = Stop-WarpGracefully -Process $proc -Id 'a9'
+            foreach ($e in $closed.Evidence) { $evidence.Add($e) }
+        }
         if ($dirC) { Stop-WarpProcessesIn -Folder $dirC }
     }
     return New-CheckResult -Id 'A9' -Status $status -Evidence $evidence.ToArray() -Note $note
@@ -1183,14 +1350,15 @@ function Invoke-CheckA11 {
         $data = Join-Path $dirD 'data'
         if (Test-Path -LiteralPath $data) { Remove-Item -LiteralPath $data -Recurse -Force }
 
-        # An explicit deny beats the allow entries, even for an administrator.
-        # Read and execute stay allowed so the exe can still start.
-        $out = & icacls.exe $dirD /deny "${identity}:(OI)(CI)(W,DC)" 2>&1
+        # Deny on the folder itself only (no inheritance): AD = create subfolders,
+        # WD = create files. The exe inside stays executable, but data\ cannot
+        # be created. An explicit deny beats the allow entries, even for an admin.
+        $out = & icacls.exe $dirD /deny "${identity}:(AD,WD)" 2>&1
         if ($LASTEXITCODE -ne 0) { throw "icacls deny failed: $out" }
         $denied = $true
         $startedAt = Get-Date
 
-        $proc = Start-WarpApp -ExeDir $dirD
+        $proc = Start-WarpApp -ExeDir $dirD -WorkingDirectory $rootD
         $box = Wait-ProcessWindow -ProcessId $proc.Id -TimeoutSeconds $script:MessageBoxTimeout -TitleLike 'Warp Portable'
         if ($null -eq $box) {
             $alive = Test-ProcessAlive -Process $proc
@@ -1198,14 +1366,16 @@ function Invoke-CheckA11 {
             if ($shot) { $evidence.Add($shot) }
             $note = if ($alive) { "No window titled 'Warp Portable' within $($script:MessageBoxTimeout) s (the process is still running)" } else { "Process exited with code $($proc.ExitCode) without a 'Warp Portable' window" }
         } else {
-            $shot = Save-Screenshot -ProcessId $proc.Id -Name 'a11-message-box.png' -TitleLike 'Warp Portable'
+            $shot = Save-Screenshot -ProcessId $proc.Id -Name 'a11-message.png' -TitleLike 'Warp Portable'
             if ($shot) { $evidence.Add($shot) }
             Send-Keys -Handle $box.Handle -Keys 'Enter'
-            $exited = $proc.WaitForExit($script:CloseTimeout * 1000)
+            $exited = $proc.WaitForExit(10000)
             if (-not $exited) {
-                $note = "The message box was shown but the process did not exit within $($script:CloseTimeout) s after Enter"
+                $note = 'The message box was shown but the process did not exit within 10 s after Enter'
             } elseif ($proc.ExitCode -ne 2) {
                 $note = "The message box was shown but the exit code is $($proc.ExitCode), expected 2"
+            } elseif (Test-Path -LiteralPath $data) {
+                $note = 'Exit code 2 and the message box were right, but a data folder was created anyway'
             } else {
                 $after = Get-TraceSnapshot
                 $trace = @(Compare-TraceSnapshot -Before (ConvertTo-PlainHashtable $script:Ctx.Before) -After (ConvertTo-PlainHashtable $after))
@@ -1213,7 +1383,7 @@ function Invoke-CheckA11 {
                 $written = @(Get-ProfileChanges -Root $env:USERPROFILE -Since $startedAt.AddSeconds(-2) -ExcludePrefix $excludes | Where-Object { $_ -match '(?i)warp' })
                 if ($trace.Count -eq 0 -and $written.Count -eq 0) {
                     $status = 'pass'
-                    $note = "Message box 'Warp Portable' shown, dismissed with Enter, exit code 2, nothing Warp-related written to the profile or registry."
+                    $note = "Message box 'Warp Portable' shown, dismissed with Enter, exit code 2, no data folder, nothing Warp-related written to the profile or registry."
                 } else {
                     $note = "Message box and exit code 2 were right, but traces appeared: $((@($trace) + @($written)) -join '; ')"
                 }
@@ -1297,7 +1467,10 @@ function Invoke-CheckA10 {
         $findings = @(Compare-TraceSnapshot -Before (ConvertTo-PlainHashtable $zero) -After (ConvertTo-PlainHashtable $snapshot))
 
         # Logs from the other user's run, copied while the folder still exists.
-        if (Test-ProcessAlive -Process $proc) { [void](Close-WarpApp -Process $proc) }
+        if (Test-ProcessAlive -Process $proc) {
+            $closed = Stop-WarpGracefully -Process $proc -Id 'a10'
+            foreach ($e in $closed.Evidence) { $evidence.Add($e) }
+        }
         [void](Copy-FolderLogs -ExeDir $dirE -Label 'folder-E-standard-user')
 
         if ($start.Ok -and $findings.Count -eq 0) {
@@ -1375,6 +1548,8 @@ function Invoke-Main {
         T0        = Get-Date
     }
     $script:Ctx.ChangedSettingsFontSpecific = $false
+    $script:Ctx.BrowserOpened = $false
+    $script:Ctx.BrowsersBefore = @()
 
     $results = [System.Collections.Generic.List[object]]::new()
     try {
@@ -1382,8 +1557,9 @@ function Invoke-Main {
         $results.Add((Invoke-CheckSafe -Id 'A3' -Body { Invoke-CheckA3 }))
         $results.Add((Invoke-CheckSafe -Id 'A12a' -Body { Invoke-CheckA12a }))
         $results.Add((Invoke-CheckSafe -Id 'A4' -Body { Invoke-CheckA4 }))
-        $results.Add((Invoke-CheckSafe -Id 'A5' -Body { Invoke-CheckA5 }))
+        try { Save-A5RunningState } catch { Write-Host "  A5 running-state snapshot failed: $($_.Exception.Message)" }
         $results.Add((Invoke-CheckSafe -Id 'A8a' -Body { Invoke-CheckA8a }))
+        $results.Add((Invoke-CheckSafe -Id 'A5' -Body { Invoke-CheckA5 }))
         $results.Add((Invoke-CheckSafe -Id 'A6/A7' -Body { Invoke-TraceCheck -Id 'A6/A7' -Tag 'a6a7' }))
         $results.Add((Invoke-CheckSafe -Id 'A8b' -Body { Invoke-CheckA8b }))
         $results.Add((Invoke-CheckSafe -Id 'D4' -Body { Invoke-CheckD4 }))

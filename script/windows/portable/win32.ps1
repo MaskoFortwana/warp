@@ -82,6 +82,7 @@ public static class PortableWin32
     [DllImport("user32.dll")] private static extern bool AttachThreadInput(uint idAttach, uint idAttachTo, bool attach);
     [DllImport("user32.dll")] private static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")] private static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] private static extern bool SystemParametersInfo(uint action, uint param, out RECT rect, uint winIni);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
 
     public static int InputStructSize() { return Marshal.SizeOf(typeof(INPUT)); }
@@ -126,6 +127,15 @@ public static class PortableWin32
     public static int[] GetVirtualScreen()
     {
         return new int[] { GetSystemMetrics(76), GetSystemMetrics(77), GetSystemMetrics(78), GetSystemMetrics(79) };
+    }
+
+    // Left, top, right, bottom of the primary screen's working area (the screen
+    // without the taskbar).
+    public static int[] GetWorkArea()
+    {
+        RECT r;
+        if (!SystemParametersInfo(0x0030, 0, out r, 0)) { return null; }  // SPI_GETWORKAREA
+        return new int[] { r.Left, r.Top, r.Right, r.Bottom };
     }
 
     public static bool BringToFront(IntPtr h)
@@ -283,8 +293,9 @@ function Set-WindowForeground {
 function Save-WindowScreenshot {
     # Crops to the window rectangle only (never the whole desktop). The window
     # is brought to the front first so nothing else covers it; the rectangle is
-    # clamped to the virtual screen because a maximised window reports a few
-    # pixels of invisible border outside it.
+    # intersected with the primary screen's working area, because the window
+    # can be larger than the runner's screen and would otherwise include the
+    # taskbar (and a maximised window reports invisible border outside it).
     param(
         [Parameter(Mandatory = $true)]$Handle,
         [Parameter(Mandatory = $true)][string]$Path
@@ -296,16 +307,21 @@ function Save-WindowScreenshot {
 
     $rect = [PortableWin32]::GetRect($hwnd)
     if ($null -eq $rect) { throw "GetWindowRect failed for handle $Handle" }
-    $screen = [PortableWin32]::GetVirtualScreen()
+    $area = [PortableWin32]::GetWorkArea()
+    if ($null -eq $area) {
+        # Fall back to the whole virtual desktop if the work area is unavailable.
+        $v = [PortableWin32]::GetVirtualScreen()
+        $area = @($v[0], $v[1], ($v[0] + $v[2]), ($v[1] + $v[3]))
+    }
 
-    $left = [Math]::Max($rect[0], $screen[0])
-    $top = [Math]::Max($rect[1], $screen[1])
-    $right = [Math]::Min($rect[2], $screen[0] + $screen[2])
-    $bottom = [Math]::Min($rect[3], $screen[1] + $screen[3])
+    $left = [Math]::Max($rect[0], $area[0])
+    $top = [Math]::Max($rect[1], $area[1])
+    $right = [Math]::Min($rect[2], $area[2])
+    $bottom = [Math]::Min($rect[3], $area[3])
     $width = $right - $left
     $height = $bottom - $top
     if ($width -le 0 -or $height -le 0) {
-        throw "Window rectangle $($rect -join ',') is outside the screen $($screen -join ',')"
+        throw "Window rectangle $($rect -join ',') is outside the screen working area $($area -join ',')"
     }
 
     $bitmap = [System.Drawing.Bitmap]::new($width, $height)
@@ -400,10 +416,14 @@ function Send-Keys {
 function Close-ProcessWindow {
     # Asks every visible top-level window of the process to close (WM_CLOSE),
     # the same as the user clicking the X. Returns how many were asked.
-    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [string[]]$ExcludeClass = @()
+    )
 
     $count = 0
     foreach ($w in @(Get-ProcessWindows -ProcessId $ProcessId -MinSize 0)) {
+        if ($ExcludeClass -contains $w.ClassName) { continue }
         if ([PortableWin32]::Close($w.Handle)) { $count++ }
     }
     return $count
