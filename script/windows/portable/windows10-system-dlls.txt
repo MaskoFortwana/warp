@@ -107,3 +107,11 @@ normaliz.dll
 # --- API sets (virtual DLLs resolved by the loader) ---
 api-ms-win-*
 ext-ms-win-*
+
+# --- added after the first CI import listing (build run 43017252905, 2026-11-11) ---
+# Windows Core Audio (MMDevice API), part of every desktop Windows 10 install.
+mmdevapi.dll
+# ICU ships in System32 since Windows 10 1903 (build 18362), our minimum target.
+icu.dll
+# Uniscribe, imported by OpenConsole.exe.
+usp10.dll
