@@ -10,6 +10,8 @@ use {
     warp_core::channel::ChannelState,
 };
 
+#[cfg(feature = "portable")]
+mod portable_instance;
 mod registry;
 #[cfg(feature = "release_bundle")]
 mod service_impl;

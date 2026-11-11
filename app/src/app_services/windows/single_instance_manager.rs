@@ -44,8 +44,21 @@ impl Drop for MutexHandle {
 static SOLE_INSTANCE_MUTEX: LazyLock<Mutex<Result<Option<MutexHandle>, Error>>> =
     LazyLock::new(|| Mutex::new(try_create_mutex()));
 
+/// Suffix that scopes the single-instance names to this portable folder. Empty for installer
+/// builds.
+fn portable_suffix() -> String {
+    #[cfg(feature = "portable")]
+    return super::portable_instance::instance_suffix(warp_core::paths::portable::root());
+    #[cfg(not(feature = "portable"))]
+    String::new()
+}
+
 pub(super) fn uri_named_pipe_name() -> String {
-    format!("Warp{:?}_URI_CHANNEL", ChannelState::channel())
+    format!(
+        "Warp{:?}_URI_CHANNEL{}",
+        ChannelState::channel(),
+        portable_suffix()
+    )
 }
 
 fn try_create_mutex() -> Result<Option<MutexHandle>, Error> {
@@ -56,11 +69,15 @@ fn try_create_mutex() -> Result<Option<MutexHandle>, Error> {
     //
     // NOTE: This lock name must stay in sync with `AppMutexName` in
     // `script/windows/windows-installer.iss`, which the installer uses to detect whether Warp is
-    // running.
-    let name = format!("Local\\Warp{:?}_SingleInstance", ChannelState::channel())
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect::<Vec<u16>>();
+    // running. The portable suffix does not apply to installer builds.
+    let name = format!(
+        "Local\\Warp{:?}_SingleInstance{}",
+        ChannelState::channel(),
+        portable_suffix()
+    )
+    .encode_utf16()
+    .chain(std::iter::once(0))
+    .collect::<Vec<u16>>();
     let handle = unsafe { CreateMutexW(None, true, windows::core::PCWSTR(name.as_ptr())) };
 
     // https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createmutexw#return-value
