@@ -1,0 +1,122 @@
+# Release build of the portable Windows zip. Runs on pushes to `portable` and on demand only
+# (ADR-0005); compile errors are caught earlier and cheaper by portable-check.yml.
+name: portable-build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [portable]
+
+concurrency:
+  group: portable-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUSTFLAGS: -C debuginfo=line-tables-only --cfg=web_sys_unstable_apis
+  TARGET: x86_64-pc-windows-msvc
+  FORK_URL: https://github.com/MaskoFortwana/warp
+  # Upstream commit the `portable` branch is based on (ADR-0002); its date is the version prefix
+  # (ADR-0010).
+  BASE_COMMIT: 2b2ed236f087b47b463f1cd55598485dd7965338
+  BASE_DATE: "2026.11.11"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 300
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Report runner resources (start)
+        shell: pwsh
+        run: |
+          Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+          Get-CimInstance Win32_ComputerSystem | Format-List NumberOfLogicalProcessors, @{n='RAM_GB';e={[math]::Round($_.TotalPhysicalMemory/1GB,1)}}
+
+      - name: Enable long paths for git
+        shell: pwsh
+        run: git config --system core.longpaths true
+
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          lfs: true
+          persist-credentials: false
+
+      - name: Set CARGO_HOME
+        shell: pwsh
+        run: Add-Content $env:GITHUB_ENV "CARGO_HOME=C:\cargo"
+
+      - name: Install the pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          rustup target add $env:TARGET
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: windows-build-rlto
+
+      - name: Install protoc
+        shell: pwsh
+        run: choco install protoc --no-progress -y
+
+      - name: Install cargo-about (licence attribution)
+        shell: bash
+        run: ./script/install_cargo_release_deps --no-build-deps
+
+      - name: Compute version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "$env:BASE_DATE-portable.$env:GITHUB_RUN_NUMBER"
+          Add-Content $env:GITHUB_OUTPUT "version=$version"
+          Add-Content $env:GITHUB_ENV "PORTABLE_VERSION=$version"
+          Write-Output "Version: $version"
+
+      - name: Build and stage the portable folder
+        id: stage
+        shell: pwsh
+        run: ./script/windows/bundle_portable.ps1 -Version $env:PORTABLE_VERSION -BaseCommit $env:BASE_COMMIT -Stage
+
+      # Signing slot (issue #26): a future step signs the staged *.exe and *.dll in place here,
+      # between staging and verification, so the zip and the checks see the signed binaries.
+
+      - name: Verify the portable folder (imports, manifest, readme)
+        shell: pwsh
+        run: >-
+          ./script/windows/portable/verify_static.ps1
+          -Folder "${{ steps.stage.outputs.staging_dir }}"
+          -ExpectedStrings $env:FORK_URL, $env:GITHUB_SHA, $env:BASE_COMMIT
+          -ReportPath dist/portable/static-report.md
+
+      - name: Zip
+        id: zip
+        shell: pwsh
+        run: ./script/windows/bundle_portable.ps1 -Version $env:PORTABLE_VERSION -BaseCommit $env:BASE_COMMIT -Zip -SkipBuild
+
+      - name: Report runner resources (end)
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: Get-PSDrive -PSProvider FileSystem | Format-Table Name, @{n='UsedGB';e={[math]::Round($_.Used/1GB,1)}}, @{n='FreeGB';e={[math]::Round($_.Free/1GB,1)}}
+
+      - name: Upload the zip
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: warp-portable-x64-${{ steps.version.outputs.version }}
+          path: |
+            ${{ steps.zip.outputs.zip_path }}
+            ${{ steps.zip.outputs.sha256sums_path }}
+          if-no-files-found: error
+
+      - name: Upload the static report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: static-report-${{ github.run_number }}
+          path: dist/portable/static-report.md
+          if-no-files-found: warn
