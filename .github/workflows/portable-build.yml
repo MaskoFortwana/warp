@@ -120,3 +120,13 @@ jobs:
           name: static-report-${{ github.run_number }}
           path: dist/portable/static-report.md
           if-no-files-found: warn
+
+  # Runtime verification of the zip (M3): unzip as a user would, start, type, compare before/after.
+  verify:
+    needs: build
+    uses: ./.github/workflows/portable-verify.yml
+    with:
+      artifact_name: warp-portable-x64-${{ needs.build.outputs.version }}
+    permissions:
+      actions: read
+      contents: read
